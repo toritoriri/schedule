@@ -1,0 +1,140 @@
+name: 打ち合わせ → Google Calendar 登録
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: '打ち合わせタイトル'
+        required: true
+        type: string
+      date:
+        description: '日付 (YYYY-MM-DD)'
+        required: true
+        type: string
+      start_time:
+        description: '開始時間 (HH:MM)'
+        required: true
+        type: string
+      end_time:
+        description: '終了時間 (HH:MM)'
+        required: true
+        type: string
+      location:
+        description: '場所'
+        required: false
+        type: string
+        default: ''
+      memo:
+        description: 'メモ'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  add-meeting:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Node.js セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: googleapis インストール
+        run: npm install googleapis
+
+      - name: Google Calendar に打ち合わせを登録
+        uses: actions/github-script@v7
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          MEETING_CALENDAR_ID: ${{ secrets.MEETING_CALENDAR_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          script: |
+            const { google } = require(`${process.env.GITHUB_WORKSPACE}/node_modules/googleapis`);
+
+            // 入力値
+            const title = '${{ inputs.title }}'.trim();
+            const date = '${{ inputs.date }}'.trim();
+            const startTime = '${{ inputs.start_time }}'.trim();
+            const endTime = '${{ inputs.end_time }}'.trim();
+            const location = '${{ inputs.location }}'.trim();
+            const memo = '${{ inputs.memo }}'.trim();
+
+            // サービスアカウント認証
+            const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+            const auth = new google.auth.GoogleAuth({
+              credentials,
+              scopes: ['https://www.googleapis.com/auth/calendar'],
+            });
+            const calendar = google.calendar({ version: 'v3', auth });
+
+            const calendarId = process.env.MEETING_CALENDAR_ID;
+
+            const timeZone = 'Asia/Tokyo';
+
+            const startDateTime = `${date}T${startTime}:00`;
+            const endDateTime = `${date}T${endTime}:00`;
+
+            // --- バッティングチェック ---
+            const existing = await calendar.events.list({
+              calendarId,
+              timeMin: new Date(`${startDateTime}+09:00`).toISOString(),
+              timeMax: new Date(`${endDateTime}+09:00`).toISOString(),
+              singleEvents: true,
+              orderBy: 'startTime',
+              timeZone,
+            });
+
+            const conflicts = (existing.data.items || []).filter(e => e.status !== 'cancelled');
+
+            if (conflicts.length > 0) {
+              const conflictList = conflicts.map(e => {
+                const s = e.start.dateTime ? new Date(e.start.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone }) : '終日';
+                const en = e.end.dateTime ? new Date(e.end.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone }) : '';
+                return `・${s}〜${en} ${e.summary}`;
+              }).join('\n');
+
+              // Slack に警告通知
+              if (process.env.SLACK_WEBHOOK_URL) {
+                await fetch(process.env.SLACK_WEBHOOK_URL, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    text: `<@UVC1GK6G2> ⚠️ スケジュールが重複しています！\n\n*新規:* ${title}\n${date} ${startTime}〜${endTime}\n\n*既存の予定:*\n${conflictList}\n\nそれでも登録されました。確認してください。`,
+                  }),
+                });
+              }
+
+              core.warning(`スケジュール重複あり:\n${conflictList}`);
+            }
+
+            // --- カレンダーに登録 ---
+            const descParts = [];
+            if (memo) descParts.push(`メモ: ${memo}`);
+
+            const event = {
+              summary: title,
+              location: location || undefined,
+              description: descParts.join('\n') || undefined,
+              start: { dateTime: startDateTime, timeZone },
+              end: { dateTime: endDateTime, timeZone },
+            };
+
+            const created = await calendar.events.insert({
+              calendarId,
+              requestBody: event,
+            });
+
+            console.log(`✅ カレンダーに登録: ${title} (${date} ${startTime}〜${endTime})`);
+
+            // Slack に登録完了通知
+            if (process.env.SLACK_WEBHOOK_URL) {
+              const msg = conflicts.length > 0
+                ? `<@UVC1GK6G2> ⚠️ 重複ありで登録しました: *${title}*\n${date} ${startTime}〜${endTime}`
+                : `<@UVC1GK6G2> ✅ 打ち合わせを登録しました: *${title}*\n${date} ${startTime}〜${endTime}${location ? `\n📍 ${location}` : ''}`;
+              await fetch(process.env.SLACK_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: msg }),
+              });
+            }

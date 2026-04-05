@@ -1,0 +1,42 @@
+name: 打ち合わせ登録
+description: 打ち合わせの予定を登録する
+labels: ["打ち合わせ"]
+body:
+  - type: input
+    id: date
+    attributes:
+      label: 日付
+      description: "YYYY-MM-DD 形式"
+      placeholder: "2026-04-10"
+    validations:
+      required: true
+  - type: input
+    id: start_time
+    attributes:
+      label: 開始時間
+      description: "HH:MM 形式"
+      placeholder: "14:00"
+    validations:
+      required: true
+  - type: input
+    id: end_time
+    attributes:
+      label: 終了時間
+      description: "HH:MM 形式"
+      placeholder: "15:00"
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: 場所
+      placeholder: "南阿蘇フィールドホテル"
+    validations:
+      required: false
+  - type: textarea
+    id: memo
+    attributes:
+      label: メモ
+      placeholder: "議題や準備事項など"
+    validations:
+      required: false

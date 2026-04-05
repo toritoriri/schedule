@@ -1,0 +1,86 @@
+name: 今日の打ち合わせを通知
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 毎朝9:00 JST（UTC 0:00）
+  workflow_dispatch:       # 手動テスト用
+
+jobs:
+  notify-schedule:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Node.js セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: googleapis インストール
+        run: npm install googleapis
+
+      - name: 今日の予定を取得して Slack に通知
+        uses: actions/github-script@v7
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          MEETING_CALENDAR_ID: ${{ secrets.MEETING_CALENDAR_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          script: |
+            const { google } = require(`${process.env.GITHUB_WORKSPACE}/node_modules/googleapis`);
+
+            const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+            const auth = new google.auth.GoogleAuth({
+              credentials,
+              scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
+            });
+            const calendar = google.calendar({ version: 'v3', auth });
+
+            const calendarId = process.env.MEETING_CALENDAR_ID;
+            const timeZone = 'Asia/Tokyo';
+
+            // 今日の開始・終了（JST）
+            const now = new Date();
+            const jstOffset = 9 * 60 * 60 * 1000;
+            const jstNow = new Date(now.getTime() + jstOffset);
+            const todayStr = jstNow.toISOString().split('T')[0];
+            const timeMin = `${todayStr}T00:00:00+09:00`;
+            const timeMax = `${todayStr}T23:59:59+09:00`;
+
+            const res = await calendar.events.list({
+              calendarId,
+              timeMin,
+              timeMax,
+              singleEvents: true,
+              orderBy: 'startTime',
+              timeZone,
+            });
+
+            const events = (res.data.items || []).filter(e => e.status !== 'cancelled');
+
+            let message;
+            if (events.length === 0) {
+              message = `<@UVC1GK6G2> 📅 *${todayStr}* の打ち合わせはありません。`;
+            } else {
+              const list = events.map(e => {
+                const start = e.start.dateTime
+                  ? new Date(e.start.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
+                  : '終日';
+                const end = e.end.dateTime
+                  ? new Date(e.end.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
+                  : '';
+                const location = e.location ? ` 📍${e.location}` : '';
+                return `• ${start}〜${end}  *${e.summary}*${location}`;
+              }).join('\n');
+
+              message = `<@UVC1GK6G2> 📅 *${todayStr}* の打ち合わせ（${events.length}件）\n\n${list}`;
+            }
+
+            console.log(message);
+
+            if (process.env.SLACK_WEBHOOK_URL) {
+              await fetch(process.env.SLACK_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: message }),
+              });
+              console.log('✅ Slack に通知しました');
+            }

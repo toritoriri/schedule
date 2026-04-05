@@ -1,0 +1,192 @@
+name: Issue → Google Calendar 同期
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened]
+
+jobs:
+  sync-calendar:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Node.js セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: googleapis インストール
+        run: npm install googleapis
+
+      - name: Google Calendar と同期
+        uses: actions/github-script@v7
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          MEETING_CALENDAR_ID: ${{ secrets.MEETING_CALENDAR_ID }}
+        with:
+          script: |
+            const { google } = require(`${process.env.GITHUB_WORKSPACE}/node_modules/googleapis`);
+
+            const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+            const auth = new google.auth.GoogleAuth({
+              credentials,
+              scopes: ['https://www.googleapis.com/auth/calendar.events'],
+            });
+            const calendar = google.calendar({ version: 'v3', auth });
+            const calendarId = process.env.MEETING_CALENDAR_ID;
+
+            const issue = context.payload.issue;
+            const action = context.payload.action;
+            const title = issue.title;
+            const url = issue.html_url;
+            const body = issue.body || '';
+
+            // --- 既存のカレンダーイベントIDをコメントから探す ---
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+            });
+            const calComment = comments.data.find(c =>
+              c.body && c.body.startsWith('<!-- calendar-event-id:')
+            );
+            const existingEventId = calComment
+              ? calComment.body.match(/<!-- calendar-event-id: (.+) -->/)?.[1]
+              : null;
+
+            // --- Closeされた場合：イベントを削除 ---
+            if (action === 'closed') {
+              if (existingEventId) {
+                try {
+                  await calendar.events.delete({ calendarId, eventId: existingEventId });
+                  console.log('カレンダーから削除:', existingEventId);
+                } catch (e) {
+                  console.log('削除スキップ:', e.message);
+                }
+              }
+              return;
+            }
+
+            // --- 日付・時間を抽出 ---
+            // 形式1: 日本語形式
+            //   📅 2026-04-16
+            //   🕐 14:00-15:00
+            //   📍 南阿蘇フィールドホテル
+            const jpDateMatch = body.match(/📅\s*(\d{4}-\d{2}-\d{2})/);
+            const jpTimeMatch = body.match(/🕐\s*(\d{1,2}:\d{2})\s*[-〜~]\s*(\d{1,2}:\d{2})/);
+            const jpLocationMatch = body.match(/📍\s*(.+)/);
+
+            // 形式2: Slack経由の英語形式
+            const enMatch = body.match(/(\w+ \d+\w*, \d{4}) at (\d+:\d+ [AP]M) UTC.*?(\w+ \d+\w*, \d{4}) at (\d+:\d+ [AP]M) UTC/);
+
+            let event;
+
+            if (jpDateMatch) {
+              const dateStr = jpDateMatch[1];
+
+              if (jpTimeMatch) {
+                const startTime = jpTimeMatch[1];
+                const endTime = jpTimeMatch[2];
+                const location = jpLocationMatch ? jpLocationMatch[1].trim() : '';
+                const memo = body
+                  .replace(/📅.*/g, '')
+                  .replace(/🕐.*/g, '')
+                  .replace(/📍.*/g, '')
+                  .trim();
+
+                event = {
+                  summary: `📋 ${title}`,
+                  description: `GitHub Issue: ${url}${memo ? '\n\n' + memo : ''}`,
+                  location: location || undefined,
+                  start: { dateTime: `${dateStr}T${startTime}:00`, timeZone: 'Asia/Tokyo' },
+                  end: { dateTime: `${dateStr}T${endTime}:00`, timeZone: 'Asia/Tokyo' },
+                };
+              } else {
+                event = {
+                  summary: `📋 ${title}`,
+                  description: `GitHub Issue: ${url}`,
+                  start: { date: dateStr },
+                  end: { date: dateStr },
+                };
+              }
+            } else if (enMatch) {
+              const startStr = `${enMatch[1]} ${enMatch[2]} UTC`;
+              const endStr = `${enMatch[3]} ${enMatch[4]} UTC`;
+              const startDate = new Date(startStr);
+              const endDate = new Date(endStr);
+
+              if (isNaN(startDate.getTime())) {
+                console.log('日付パース失敗:', startStr);
+                return;
+              }
+
+              const bodyText = body.replace(/\w+ \d+\w*, \d{4} at \d+:\d+ [AP]M UTC/g, '').trim();
+
+              event = {
+                summary: `📋 ${title}`,
+                description: `GitHub Issue: ${url}\n\n${bodyText}`,
+                start: { dateTime: startDate.toISOString(), timeZone: 'Asia/Tokyo' },
+                end: { dateTime: endDate.toISOString(), timeZone: 'Asia/Tokyo' },
+              };
+            } else {
+              // 日付が見つからない → 翌日で登録
+              const tomorrow = new Date();
+              tomorrow.setDate(tomorrow.getDate() + 1);
+              const dateStr = tomorrow.toISOString().split('T')[0];
+
+              event = {
+                summary: `📋 ${title}`,
+                description: `GitHub Issue: ${url}`,
+                start: { date: dateStr },
+                end: { date: dateStr },
+              };
+            }
+
+            // --- 更新 or 新規作成 ---
+            let eventId;
+
+            if (existingEventId) {
+              try {
+                await calendar.events.update({
+                  calendarId,
+                  eventId: existingEventId,
+                  requestBody: event,
+                });
+                eventId = existingEventId;
+                console.log('カレンダーを更新:', title);
+              } catch (e) {
+                console.log('既存イベントが見つからないため新規作成:', e.message);
+                const created = await calendar.events.insert({
+                  calendarId,
+                  requestBody: event,
+                });
+                eventId = created.data.id;
+              }
+            } else {
+              const created = await calendar.events.insert({
+                calendarId,
+                requestBody: event,
+              });
+              eventId = created.data.id;
+              console.log('カレンダーに追加:', title);
+            }
+
+            // --- イベントIDをコメントに保存 ---
+            const commentBody = `<!-- calendar-event-id: ${eventId} -->`;
+            if (calComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: calComment.id,
+                body: commentBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: commentBody,
+              });
+            }
+
+            console.log(`✅ 同期完了: ${title} (eventId: ${eventId})`);
