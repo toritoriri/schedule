@@ -54,6 +54,13 @@ jobs:
             // 曜日名
             const dayNames = ['日', '月', '火', '水', '木', '金', '土'];
 
+            // 日付文字列から正しい曜日を取得（タイムゾーンずれ回避）
+            const getDayName = (dateStr) => {
+              const [y, m, d] = dateStr.split('-').map(Number);
+              const utcDate = new Date(Date.UTC(y, m - 1, d));
+              return dayNames[utcDate.getUTCDay()];
+            };
+
             // 複数カレンダーからイベントを取得してマージ
             async function fetchEvents(timeMin, timeMax) {
               const allEvents = [];
@@ -93,14 +100,15 @@ jobs:
 
             // イベントを1行にフォーマット
             const formatEvent = (e) => {
+              const title = e.summary.replace(/^📋\s*/, '');
               const start = e.start.dateTime
                 ? new Date(e.start.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
                 : '終日';
               const end = e.end.dateTime
                 ? new Date(e.end.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
                 : '';
-              const location = e.location ? ` 📍${e.location}` : '';
-              return `${start}〜${end}  *${e.summary}*${location}`;
+              const location = e.location ? `  ${e.location}` : '';
+              return `${start}〜${end}  *${title}*${location}`;
             };
 
             // --- 今日の予定 ---
@@ -125,7 +133,7 @@ jobs:
             const parts = [];
 
             // 今日の予定
-            const todayDay = dayNames[jstNow.getDay()];
+            const todayDay = getDayName(todayStr);
             if (todayEvents.length === 0) {
               parts.push(`*今日の予定（${todayStr} ${todayDay}）*\n予定なし`);
             } else {
@@ -148,10 +156,10 @@ jobs:
 
               const weekLines = [];
               for (const [dateStr, events] of Object.entries(byDate)) {
-                const d = new Date(dateStr + 'T00:00:00+09:00');
-                const day = dayNames[d.getDay()];
+                const day = getDayName(dateStr);
                 weekLines.push(`\n_${dateStr}（${day}）_`);
                 events.forEach((e, i) => {
+                  const title = e.summary.replace(/^📋\s*/, '');
                   const start = e.start.dateTime
                     ? new Date(e.start.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
                     : '';
@@ -161,7 +169,7 @@ jobs:
                   const time = start ? `${start}〜${end}` : '';
                   const location = e.location ? e.location : '';
                   const details = [time, location].filter(Boolean).join('  ');
-                  weekLines.push(`${i + 1}. *${e.summary}*${details ? '  ' + details : ''}`);
+                  weekLines.push(`${i + 1}. *${title}*${details ? '  ' + details : ''}`);
                 });
               }
 
