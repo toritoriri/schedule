@@ -74,10 +74,12 @@ jobs:
                 }
               }
               // 開始時間で重複排除（同じタイトル・同じ開始時間）してソート
+              // 重複排除（📋プレフィックスを除去して比較）
               const seen = new Set();
               return allEvents
                 .filter(e => {
-                  const key = `${e.summary}_${e.start.dateTime || e.start.date}`;
+                  const normalizedTitle = e.summary.replace(/^📋\s*/, '');
+                  const key = `${normalizedTitle}_${e.start.dateTime || e.start.date}`;
                   if (seen.has(key)) return false;
                   seen.add(key);
                   return true;
