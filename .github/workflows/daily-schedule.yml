@@ -1,4 +1,4 @@
-name: 今日の打ち合わせを通知
+name: 今日・今週の予定を通知
 
 on:
   schedule:
@@ -17,7 +17,7 @@ jobs:
       - name: googleapis インストール
         run: npm install googleapis
 
-      - name: 今日の予定を取得して Slack に通知
+      - name: 今日・今週の予定を取得して Slack に通知
         uses: actions/github-script@v7
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
@@ -37,43 +37,98 @@ jobs:
             const calendarId = process.env.MEETING_CALENDAR_ID;
             const timeZone = 'Asia/Tokyo';
 
-            // 今日の開始・終了（JST）
+            // 今日（JST）
             const now = new Date();
             const jstOffset = 9 * 60 * 60 * 1000;
             const jstNow = new Date(now.getTime() + jstOffset);
             const todayStr = jstNow.toISOString().split('T')[0];
-            const timeMin = `${todayStr}T00:00:00+09:00`;
-            const timeMax = `${todayStr}T23:59:59+09:00`;
 
-            const res = await calendar.events.list({
+            // 今週の日曜日まで（今日から週末まで）
+            const dayOfWeek = jstNow.getDay(); // 0=日, 1=月, ..., 6=土
+            const daysUntilSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+            const weekEnd = new Date(jstNow.getTime() + daysUntilSunday * 24 * 60 * 60 * 1000);
+            const weekEndStr = weekEnd.toISOString().split('T')[0];
+
+            // 曜日名
+            const dayNames = ['日', '月', '火', '水', '木', '金', '土'];
+
+            // イベントを1行にフォーマット
+            const formatEvent = (e) => {
+              const start = e.start.dateTime
+                ? new Date(e.start.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
+                : '終日';
+              const end = e.end.dateTime
+                ? new Date(e.end.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
+                : '';
+              const location = e.location ? ` 📍${e.location}` : '';
+              return `${start}〜${end}  *${e.summary}*${location}`;
+            };
+
+            // --- 今日の予定 ---
+            const todayRes = await calendar.events.list({
               calendarId,
-              timeMin,
-              timeMax,
+              timeMin: `${todayStr}T00:00:00+09:00`,
+              timeMax: `${todayStr}T23:59:59+09:00`,
               singleEvents: true,
               orderBy: 'startTime',
               timeZone,
             });
+            const todayEvents = (todayRes.data.items || []).filter(e => e.status !== 'cancelled');
 
-            const events = (res.data.items || []).filter(e => e.status !== 'cancelled');
+            // --- 今週の予定（今日の翌日〜週末） ---
+            const tomorrowDate = new Date(jstNow.getTime() + 24 * 60 * 60 * 1000);
+            const tomorrowStr = tomorrowDate.toISOString().split('T')[0];
 
-            let message;
-            if (events.length === 0) {
-              message = `<@UVC1GK6G2> 📅 *${todayStr}* の打ち合わせはありません。`;
-            } else {
-              const list = events.map(e => {
-                const start = e.start.dateTime
-                  ? new Date(e.start.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
-                  : '終日';
-                const end = e.end.dateTime
-                  ? new Date(e.end.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
-                  : '';
-                const location = e.location ? ` 📍${e.location}` : '';
-                return `• ${start}〜${end}  *${e.summary}*${location}`;
-              }).join('\n');
-
-              message = `<@UVC1GK6G2> 📅 *${todayStr}* の打ち合わせ（${events.length}件）\n\n${list}`;
+            let weekEvents = [];
+            if (tomorrowStr <= weekEndStr) {
+              const weekRes = await calendar.events.list({
+                calendarId,
+                timeMin: `${tomorrowStr}T00:00:00+09:00`,
+                timeMax: `${weekEndStr}T23:59:59+09:00`,
+                singleEvents: true,
+                orderBy: 'startTime',
+                timeZone,
+              });
+              weekEvents = (weekRes.data.items || []).filter(e => e.status !== 'cancelled');
             }
 
+            // --- メッセージ組み立て ---
+            const parts = [];
+
+            // 今日の予定
+            const todayDay = dayNames[jstNow.getDay()];
+            if (todayEvents.length === 0) {
+              parts.push(`*今日の予定（${todayStr} ${todayDay}）*\n予定なし`);
+            } else {
+              const list = todayEvents.map((e, i) => `${i + 1}. ${formatEvent(e)}`).join('\n');
+              parts.push(`*今日の予定（${todayStr} ${todayDay}）— ${todayEvents.length}件*\n${list}`);
+            }
+
+            // 今週の予定（日付ごとにグループ化）
+            if (weekEvents.length === 0) {
+              parts.push(`*今週の残り予定*\n予定なし`);
+            } else {
+              const byDate = {};
+              for (const e of weekEvents) {
+                const dateStr = e.start.dateTime
+                  ? e.start.dateTime.split('T')[0]
+                  : e.start.date;
+                if (!byDate[dateStr]) byDate[dateStr] = [];
+                byDate[dateStr].push(e);
+              }
+
+              const weekLines = [];
+              for (const [dateStr, events] of Object.entries(byDate)) {
+                const d = new Date(dateStr + 'T00:00:00+09:00');
+                const day = dayNames[d.getDay()];
+                weekLines.push(`\n_${dateStr}（${day}）_`);
+                events.forEach((e, i) => weekLines.push(`${i + 1}. ${formatEvent(e)}`));
+              }
+
+              parts.push(`*今週の残り予定 — ${weekEvents.length}件*${weekLines.join('\n')}`);
+            }
+
+            const message = `<@UVC1GK6G2>\n\n${parts.join('\n\n')}`;
             console.log(message);
 
             if (process.env.SLACK_WEBHOOK_URL) {
