@@ -47,10 +47,8 @@ jobs:
             const jstNow = new Date(now.getTime() + jstOffset);
             const todayStr = jstNow.toISOString().split('T')[0];
 
-            // 今週の日曜日まで（今日から週末まで）
-            const dayOfWeek = jstNow.getDay(); // 0=日, 1=月, ..., 6=土
-            const daysUntilSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
-            const weekEnd = new Date(jstNow.getTime() + daysUntilSunday * 24 * 60 * 60 * 1000);
+            // 今後7日間
+            const weekEnd = new Date(jstNow.getTime() + 7 * 24 * 60 * 60 * 1000);
             const weekEndStr = weekEnd.toISOString().split('T')[0];
 
             // 曜日名
@@ -133,9 +131,9 @@ jobs:
               parts.push(`*今日の予定（${todayStr} ${todayDay}）— ${todayEvents.length}件*\n${list}`);
             }
 
-            // 今週の予定（日付ごとにグループ化）
+            // 今後7日間の予定（日付ごとにグループ化）
             if (weekEvents.length === 0) {
-              parts.push(`*今週の残り予定*\n予定なし`);
+              parts.push(`*今後7日間の予定*\n予定なし`);
             } else {
               const byDate = {};
               for (const e of weekEvents) {
@@ -151,10 +149,21 @@ jobs:
                 const d = new Date(dateStr + 'T00:00:00+09:00');
                 const day = dayNames[d.getDay()];
                 weekLines.push(`\n_${dateStr}（${day}）_`);
-                events.forEach((e, i) => weekLines.push(`${i + 1}. ${formatEvent(e)}`));
+                events.forEach((e, i) => {
+                  const start = e.start.dateTime
+                    ? new Date(e.start.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
+                    : '';
+                  const end = e.end.dateTime
+                    ? new Date(e.end.dateTime).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone })
+                    : '';
+                  const time = start ? `${start}〜${end}` : '';
+                  const location = e.location ? e.location : '';
+                  const details = [time, location].filter(Boolean).join('  ');
+                  weekLines.push(`${i + 1}. *${e.summary}*${details ? '  ' + details : ''}`);
+                });
               }
 
-              parts.push(`*今週の残り予定 — ${weekEvents.length}件*${weekLines.join('\n')}`);
+              parts.push(`*今後7日間の予定 — ${weekEvents.length}件*${weekLines.join('\n')}`);
             }
 
             const message = `<@UVC1GK6G2>\n\n${parts.join('\n\n')}`;
