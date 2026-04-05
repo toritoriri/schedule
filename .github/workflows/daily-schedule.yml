@@ -22,6 +22,7 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
           MEETING_CALENDAR_ID: ${{ secrets.MEETING_CALENDAR_ID }}
+          MEETING_CALENDAR_ID_2: ${{ secrets.MEETING_CALENDAR_ID_2 }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         with:
           script: |
@@ -34,7 +35,10 @@ jobs:
             });
             const calendar = google.calendar({ version: 'v3', auth });
 
-            const calendarId = process.env.MEETING_CALENDAR_ID;
+            const calendarIds = [process.env.MEETING_CALENDAR_ID];
+            if (process.env.MEETING_CALENDAR_ID_2) {
+              calendarIds.push(process.env.MEETING_CALENDAR_ID_2);
+            }
             const timeZone = 'Asia/Tokyo';
 
             // 今日（JST）
@@ -52,6 +56,41 @@ jobs:
             // 曜日名
             const dayNames = ['日', '月', '火', '水', '木', '金', '土'];
 
+            // 複数カレンダーからイベントを取得してマージ
+            async function fetchEvents(timeMin, timeMax) {
+              const allEvents = [];
+              for (const calendarId of calendarIds) {
+                try {
+                  const res = await calendar.events.list({
+                    calendarId,
+                    timeMin,
+                    timeMax,
+                    singleEvents: true,
+                    orderBy: 'startTime',
+                    timeZone,
+                  });
+                  const events = (res.data.items || []).filter(e => e.status !== 'cancelled');
+                  allEvents.push(...events);
+                } catch (e) {
+                  console.log(`カレンダー ${calendarId} の取得スキップ:`, e.message);
+                }
+              }
+              // 開始時間で重複排除（同じタイトル・同じ開始時間）してソート
+              const seen = new Set();
+              return allEvents
+                .filter(e => {
+                  const key = `${e.summary}_${e.start.dateTime || e.start.date}`;
+                  if (seen.has(key)) return false;
+                  seen.add(key);
+                  return true;
+                })
+                .sort((a, b) => {
+                  const aTime = a.start.dateTime || a.start.date;
+                  const bTime = b.start.dateTime || b.start.date;
+                  return aTime.localeCompare(bTime);
+                });
+            }
+
             // イベントを1行にフォーマット
             const formatEvent = (e) => {
               const start = e.start.dateTime
@@ -65,15 +104,10 @@ jobs:
             };
 
             // --- 今日の予定 ---
-            const todayRes = await calendar.events.list({
-              calendarId,
-              timeMin: `${todayStr}T00:00:00+09:00`,
-              timeMax: `${todayStr}T23:59:59+09:00`,
-              singleEvents: true,
-              orderBy: 'startTime',
-              timeZone,
-            });
-            const todayEvents = (todayRes.data.items || []).filter(e => e.status !== 'cancelled');
+            const todayEvents = await fetchEvents(
+              `${todayStr}T00:00:00+09:00`,
+              `${todayStr}T23:59:59+09:00`
+            );
 
             // --- 今週の予定（今日の翌日〜週末） ---
             const tomorrowDate = new Date(jstNow.getTime() + 24 * 60 * 60 * 1000);
@@ -81,15 +115,10 @@ jobs:
 
             let weekEvents = [];
             if (tomorrowStr <= weekEndStr) {
-              const weekRes = await calendar.events.list({
-                calendarId,
-                timeMin: `${tomorrowStr}T00:00:00+09:00`,
-                timeMax: `${weekEndStr}T23:59:59+09:00`,
-                singleEvents: true,
-                orderBy: 'startTime',
-                timeZone,
-              });
-              weekEvents = (weekRes.data.items || []).filter(e => e.status !== 'cancelled');
+              weekEvents = await fetchEvents(
+                `${tomorrowStr}T00:00:00+09:00`,
+                `${weekEndStr}T23:59:59+09:00`
+              );
             }
 
             // --- メッセージ組み立て ---
