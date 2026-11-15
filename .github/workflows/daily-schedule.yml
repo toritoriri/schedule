@@ -187,3 +187,19 @@ jobs:
               });
               console.log('✅ Slack に通知しました');
             }
+
+  keepalive:
+    # GitHub は、60日間リポジトリに変更が無いと定期実行を自動で止める（2026-06 に schedule の予定通知がこれで止まった）。
+    # 毎回「使っている」と伝えて（有効にし直して）、止まらないようにする
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: 定期実行を有効のままにする
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in daily-schedule.yml; do
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$wf/enable"
+            echo "有効のまま: $wf"
+          done
